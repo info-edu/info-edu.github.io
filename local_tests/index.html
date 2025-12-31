@@ -59,29 +59,31 @@
         // 2. RECURSIVE SCANNER (The "Keep-Alive" logic)
         async function startHighPriorityScan() {
             try {
-                // Stop previous scan if it exists to refresh the priority
-                if (currentScan) {
-                    log("Refreshing Scan Window...");
-                    await currentScan.stop();
-                }
-
-                log("Requesting LE Scan...");
-                currentScan = await navigator.bluetooth.requestLEScan({
+                log("Step 1: Gaining Device Permission...");
+                // This opens the prompt. You MUST select the scale here.
+                const device = await navigator.bluetooth.requestDevice({
                     filters: [{ namePrefix: 'IF_B7' }],
-                    keepRepeatedDevices: true
+                    optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
+                });
+                
+                log("Permission Granted for: " + device.name);
+
+                log("Step 2: Starting High-Priority Scan...");
+                if (currentScan) await currentScan.stop();
+
+                // On Xiaomi, adding 'acceptAllAdvertisements' sometimes bypasses the filter bug
+                currentScan = await navigator.bluetooth.requestLEScan({
+                    keepRepeatedDevices: true,
+                    filters: [{ namePrefix: 'IF_B7' }]
                 });
 
-                log("Scan Active. Priority Boosted.");
+                log("Scan Active. Watch for green dot!");
 
-                // Refresh every 20 seconds to stay under the Android limit (5 starts per 30s)
-                // but keep the radio from entering "sleep" mode.
                 clearTimeout(scanTimer);
                 scanTimer = setTimeout(startHighPriorityScan, 20000);
 
             } catch (err) {
-                log("Scan Error: " + err.message);
-                // Retry in 5 seconds if failed
-                scanTimer = setTimeout(startHighPriorityScan, 5000);
+                log("Error: " + err.message, true);
             }
         }
 
