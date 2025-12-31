@@ -1,96 +1,63 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Passive Scale Pro (High-Priority)</title>
+    <title>Passive Scale Pro</title>
     <style>
         body { font-family: sans-serif; text-align: center; background: #121212; color: #00ff00; padding: 20px; }
         #weight { font-size: 100px; font-weight: bold; margin: 40px 0; }
         #log { font-size: 12px; color: #888; text-align: left; background: #000; padding: 10px; height: 150px; overflow-y: scroll; }
         button { padding: 20px; width: 100%; font-size: 20px; background: #00ff00; color: black; border: none; border-radius: 10px; }
-        #status-dot { width: 15px; height: 15px; background: red; border-radius: 50%; display: inline-block; margin-right: 10px; }
     </style>
 </head>
 <body>
     <h1>Passive Scale Reader</h1>
-    <div><span id="status-dot"></span><span id="status-text">Disconnected</span></div>
     <div id="weight">0.00 kg</div>
-    <button id="start">START HIGH-PRIORITY SCAN</button>
+    <button id="start">START SCANNING</button>
     <div id="log">Logs:</div>
 
     <script>
         const weightEl = document.getElementById('weight');
         const logEl = document.getElementById('log');
-        const dot = document.getElementById('status-dot');
-        const statusText = document.getElementById('status-text');
-
-        let currentScan = null;
-        let scanTimer = null;
-        let lastPacketTime = 0;
 
         function log(msg) {
             logEl.innerHTML += `<div>${new Date().toLocaleTimeString()}: ${msg}</div>`;
             logEl.scrollTop = logEl.scrollHeight;
         }
 
-        // 1. DATA RECEIVER (Set once)
-        navigator.bluetooth.addEventListener('advertisementreceived', event => {
-            lastPacketTime = Date.now();
-            dot.style.background = "#00ff00"; // Green on packet
-            statusText.innerText = "Receiving Data";
-
-            let mData = event.manufacturerData;
-            if (mData && mData.size > 0) {
-                let raw = new DataView(mData.values().next().value.buffer);
-                // Your confirmed logic for WH-C06
-                const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
-                const weight = weightRaw / 100.0;
-                weightEl.innerText = weight.toFixed(2) + " kg";
-            }
-        });
-
-        // Watchdog to turn the dot red if data stops for 1.5 seconds
-        setInterval(() => {
-            if (Date.now() - lastPacketTime > 1500) {
-                dot.style.background = "red";
-                statusText.innerText = "Gap Detected / Idle";
-            }
-        }, 1000);
-
-        // 2. RECURSIVE SCANNER (The "Keep-Alive" logic)
-        async function startHighPriorityScan() {
+        document.getElementById('start').addEventListener('click', async () => {
             try {
-                log("Step 1: Gaining Device Permission...");
-                // This opens the prompt. You MUST select the scale here.
-                const device = await navigator.bluetooth.requestDevice({
+                log("Requesting LE Scan...");
+                // We ask for a scan instead of a connection
+                const scan = await navigator.bluetooth.requestLEScan({
                     filters: [{ namePrefix: 'IF_B7' }],
-                    optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
-                });
-                
-                log("Permission Granted for: " + device.name);
-
-                log("Step 2: Starting High-Priority Scan...");
-                if (currentScan) await currentScan.stop();
-
-                // On Xiaomi, adding 'acceptAllAdvertisements' sometimes bypasses the filter bug
-                currentScan = await navigator.bluetooth.requestLEScan({
-                    keepRepeatedDevices: true,
-                    filters: [{ namePrefix: 'IF_B7' }]
+                    keepRepeatedDevices: true // CRITICAL: This allows high-frequency updates
                 });
 
-                log("Scan Active. Watch for green dot!");
+                log("Scan Started! Listening...");
 
-                clearTimeout(scanTimer);
-                scanTimer = setTimeout(startHighPriorityScan, 20000);
+                navigator.bluetooth.addEventListener('advertisementreceived', event => {
+                    log("Packet received!");
+                    
+                    // Access Manufacturer Data
+                    let mData = event.manufacturerData;
+                    if (mData && mData.size > 0) {
+                        // Get the first value in the map
+                        let raw = new DataView(mData.values().next().value.buffer);
+                        
+                        // Using our confirmed logic (Bytes 10 and 11)
+                        // Note: DataView indices depend on how the browser packs the buffer
+                        // If 10/11 fails, try 11/12 or 1/2
+                        const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
+                        const weight = weightRaw / 100.0;
+                        
+                        weightEl.innerText = weight.toFixed(2) + " kg";
+                    }
+                });
 
             } catch (err) {
-                log("Error: " + err.message, true);
+                log("Error: " + err.message);
+                console.error(err);
             }
-        }
-
-        // 3. TRIGGER ON BUTTON CLICK
-        document.getElementById('start').addEventListener('click', () => {
-            log("User gesture received. Initializing...");
-            startHighPriorityScan();
         });
     </script>
 </body>
