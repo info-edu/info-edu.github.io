@@ -1,77 +1,64 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Scale Debugger</title>
+    <title>Passive Scale Pro</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
-        #log { 
-            background: #000; color: #0f0; padding: 10px; 
-            height: 300px; overflow-y: scroll; font-family: monospace;
-            font-size: 12px; border-radius: 5px; margin-top: 20px;
-        }
-        button { width: 100%; padding: 20px; font-size: 18px; background: #007bff; color: white; border: none; border-radius: 10px; }
-        .error { color: #ff5555; }
+        body { font-family: sans-serif; text-align: center; background: #121212; color: #00ff00; padding: 20px; }
+        #weight { font-size: 100px; font-weight: bold; margin: 40px 0; }
+        #log { font-size: 12px; color: #888; text-align: left; background: #000; padding: 10px; height: 150px; overflow-y: scroll; }
+        button { padding: 20px; width: 100%; font-size: 20px; background: #00ff00; color: black; border: none; border-radius: 10px; }
     </style>
 </head>
 <body>
-    <h2>Scale Connection Test</h2>
-    <button onclick="safeConnect()">1. TAP TO CONNECT</button>
-    
-    <div id="log">--- Debugging Log Started ---<br></div>
+    <h1>Passive Scale Reader</h1>
+    <div id="weight">0.00 kg</div>
+    <button id="start">START SCANNING</button>
+    <div id="log">Logs:</div>
 
     <script>
+        const weightEl = document.getElementById('weight');
         const logEl = document.getElementById('log');
 
-        function log(msg, isError = false) {
-            const time = new Date().toLocaleTimeString();
-            const color = isError ? 'color: #ff5555;' : '';
-            logEl.innerHTML += `<div>[${time}] <span style="${color}">${msg}</span></div>`;
+        function log(msg) {
+            logEl.innerHTML += `<div>${new Date().toLocaleTimeString()}: ${msg}</div>`;
             logEl.scrollTop = logEl.scrollHeight;
         }
 
-        async function safeConnect() {
-            log("Searching for IF_B7...");
+        document.getElementById('start').addEventListener('click', async () => {
             try {
-                const device = await navigator.bluetooth.requestDevice({
+                log("Requesting LE Scan...");
+                // We ask for a scan instead of a connection
+                const scan = await navigator.bluetooth.requestLEScan({
                     filters: [{ namePrefix: 'IF_B7' }],
-                    optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
+                    keepRepeatedDevices: true // CRITICAL: This allows high-frequency updates
                 });
-        
-                log("Device found: " + device.name);
-                
-                // Listen for sudden disconnections
-                device.addEventListener('gattserverdisconnected', () => {
-                    log("DISCONNECTED by device/OS", true);
+
+                log("Scan Started! Listening...");
+
+                navigator.bluetooth.addEventListener('advertisementreceived', event => {
+                    log("Packet received!");
+                    
+                    // Access Manufacturer Data
+                    let mData = event.manufacturerData;
+                    if (mData && mData.size > 0) {
+                        // Get the first value in the map
+                        let raw = new DataView(mData.values().next().value.buffer);
+                        
+                        // Using our confirmed logic (Bytes 10 and 11)
+                        // Note: DataView indices depend on how the browser packs the buffer
+                        // If 10/11 fails, try 11/12 or 1/2
+                        const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
+                        const weight = weightRaw / 100.0;
+                        
+                        weightEl.innerText = weight.toFixed(2) + " kg";
+                    }
                 });
-        
-                log("Connecting to GATT (Attempting handshake)...");
-                
-                // We wrap the connection in a timeout
-                const server = await Promise.race([
-                    device.gatt.connect(),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error("GATT Timeout")), 10000))
-                ]);
-        
-                log("CONNECTED! Discovering Service...");
-                const service = await server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb');
-                
-                log("Finding Characteristic...");
-                const char = await service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb');
-                
-                log("Starting Stream...");
-                await char.startNotifications();
-                char.addEventListener('characteristicvaluechanged', (e) => {
-                    const v = e.target.value;
-                    // Byte 1 and 2 of the notification payload are the weight
-                    const weight = ((v.getUint8(1) << 8) + v.getUint8(2)) / 100.0;
-                    log("Weight: " + weight.toFixed(2) + " kg");
-                });
-        
+
             } catch (err) {
-                log("FAIL: " + err.message, true);
-                log("Try: Turn Scale OFF/ON and Toggle Phone BT.", true);
+                log("Error: " + err.message);
+                console.error(err);
             }
-        }
+        });
     </script>
 </body>
 </html>
