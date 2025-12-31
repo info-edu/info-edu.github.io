@@ -34,40 +34,42 @@
             try {
                 const device = await navigator.bluetooth.requestDevice({
                     filters: [{ namePrefix: 'IF_B7' }],
-                    // This allows us to see ALL services the scale has
-                    optionalServices: [
-                        '0000ffe0-0000-1000-8000-00805f9b34fb', 
-                        '0000ff12-0000-1000-8000-00805f9b34fb'
-                    ]
+                    optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
                 });
-
-                log("Device selected: " + device.name);
-                log("Connecting to GATT...");
-                const server = await device.gatt.connect();
-                log("CONNECTED!");
-
-                log("Discovering Services...");
-                const services = await server.getPrimaryServices();
+        
+                log("Device found: " + device.name);
                 
-                if (services.length === 0) {
-                    log("ERR: No services found!", true);
-                    return;
-                }
-
-                services.forEach(s => log("Found Service: " + s.uuid));
-
-                // Try to find the data channel
-                const service = services[0]; // Let's try the first one found
-                log("Using Service: " + service.uuid);
+                // Listen for sudden disconnections
+                device.addEventListener('gattserverdisconnected', () => {
+                    log("DISCONNECTED by device/OS", true);
+                });
+        
+                log("Connecting to GATT (Attempting handshake)...");
                 
-                const chars = await service.getCharacteristics();
-                chars.forEach(c => log("Found Characteristic: " + c.uuid));
-
+                // We wrap the connection in a timeout
+                const server = await Promise.race([
+                    device.gatt.connect(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("GATT Timeout")), 10000))
+                ]);
+        
+                log("CONNECTED! Discovering Service...");
+                const service = await server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb');
+                
+                log("Finding Characteristic...");
+                const char = await service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb');
+                
+                log("Starting Stream...");
+                await char.startNotifications();
+                char.addEventListener('characteristicvaluechanged', (e) => {
+                    const v = e.target.value;
+                    // Byte 1 and 2 of the notification payload are the weight
+                    const weight = ((v.getUint8(1) << 8) + v.getUint8(2)) / 100.0;
+                    log("Weight: " + weight.toFixed(2) + " kg");
+                });
+        
             } catch (err) {
-                log("CRITICAL ERROR: " + err.message, true);
-                if (err.message.includes("User cancelled")) {
-                    log("Tip: You must select the scale in the popup.", true);
-                }
+                log("FAIL: " + err.message, true);
+                log("Try: Turn Scale OFF/ON and Toggle Phone BT.", true);
             }
         }
     </script>
