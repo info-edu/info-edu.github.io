@@ -3,40 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stable Crane Trainer</title>
+    <title>Stable Isometric Trainer</title>
     <style>
         :root { --bg: #121212; --primary: #00ff00; --accent: #333; --text: #00ff00; }
         body { 
             font-family: sans-serif; text-align: center; background: var(--bg); color: var(--text); 
             margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; justify-content: space-around;
-            transition: background 0.3s, color 0.3s;
+            transition: background 0.3s;
         }
-        body.finished { --bg: #00ff00; --text: #000; --primary: #000; --accent: #00cc00; }
+        body.finished { background: #00ff00; color: #000; }
         #status-dot { width: 12px; height: 12px; background: red; border-radius: 50%; display: inline-block; margin-right: 8px; }
-        #weight-display { font-size: 80px; font-weight: bold; margin: 10px 0; }
+        #weight-display { font-size: 80px; font-weight: bold; }
         .unit { font-size: 30px; }
         .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .input-group { background: var(--accent); padding: 15px; border-radius: 12px; }
         .input-group label { display: block; font-size: 11px; color: #888; margin-bottom: 5px; text-transform: uppercase; }
         .input-group input { background: transparent; border: none; color: inherit; font-size: 24px; width: 80%; text-align: center; outline: none; }
-        #timer-display { font-size: 40px; color: inherit; }
+        #timer-display { font-size: 40px; }
         .progress-container { width: 100%; height: 12px; background: #222; border-radius: 6px; overflow: hidden; }
         #progress-bar { width: 0%; height: 100%; background: var(--primary); transition: width 0.15s linear; }
-        #main-btn { 
-            padding: 25px; width: 100%; font-size: 22px; font-weight: bold; 
-            border: none; border-radius: 15px; cursor: pointer;
-            background: #555; color: white;
-        }
-        .btn-ready { background: var(--primary) !important; color: black !important; }
+        #main-btn { padding: 25px; width: 100%; font-size: 22px; font-weight: bold; border: none; border-radius: 15px; cursor: pointer; background: var(--primary); color: black; }
         .btn-active { background: #ff4444 !important; color: white !important; }
-        .hidden { visibility: hidden; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
 
     <div>
         <div style="font-size: 13px; opacity: 0.8;">
-            <span id="status-dot"></span><span id="status-text">BT: Idle</span>
+            <span id="status-dot"></span><span id="status-text">Waiting for Scale...</span>
         </div>
         <div id="weight-display">0.00<span class="unit">kg</span></div>
     </div>
@@ -46,7 +41,6 @@
         <div class="progress-container">
             <div id="progress-bar"></div>
         </div>
-        <div id="finish-msg" class="hidden">SET COMPLETE!</div>
     </div>
 
     <div class="settings-grid">
@@ -60,30 +54,27 @@
         </div>
     </div>
 
-    <button id="main-btn">INITIALIZE BLUETOOTH</button>
+    <button id="main-btn">INITIALIZE & START</button>
 
     <script>
+        // DOM Elements
         const weightEl = document.getElementById('weight-display');
         const timerEl = document.getElementById('timer-display');
         const progressEl = document.getElementById('progress-bar');
         const mainBtn = document.getElementById('main-btn');
         const dot = document.getElementById('status-dot');
         const statusText = document.getElementById('status-text');
-        const finishMsg = document.getElementById('finish-msg');
 
-        let bluetoothInitialized = false;
+        // State
         let isTraining = false;
-        let currentWeight = 0;
         let tutAccumulated = 0;
         let lastTimestamp = 0;
         let lastPacketTime = 0;
-        let scanInstance = null;
-        let wakeLock = null;
+        let currentWeight = 0;
         let audioCtx = null;
-        let isAttemptingRestart = false;
+        let wakeLock = null;
 
-        function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-        
+        // 1. AUDIO HELPER
         function beep(freq, duration) {
             if (!audioCtx) return;
             const osc = audioCtx.createOscillator();
@@ -94,73 +85,55 @@
             osc.start(); osc.stop(audioCtx.currentTime + duration);
         }
 
-        async function requestWakeLock() {
-            if ('wakeLock' in navigator) {
-                try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
-            }
-        }
-
-        async function startOrRestartScan() {
-            if (isAttemptingRestart) return;
-            isAttemptingRestart = true;
-
-            try {
-                // 1. Force stop previous instance if it exists
-                if (scanInstance) {
-                    try { await scanInstance.stop(); } catch(e) {}
-                    scanInstance = null;
-                }
-
-                statusText.innerText = "Connecting...";
-                
-                // 2. Small delay to let the BT hardware reset
-                await new Promise(r => setTimeout(r, 500));
-
-                scanInstance = await navigator.bluetooth.requestLEScan({
-                    keepRepeatedDevices: true,
-                    filters: [{ namePrefix: 'IF_B7' }]
-                });
-                
-                bluetoothInitialized = true;
-                statusText.innerText = "Receiving...";
-            } catch (err) {
-                console.error("Scan error:", err);
-                statusText.innerText = "BT Sync Error. Waiting...";
-                // If it fails, we wait longer before the next attempt
-                await new Promise(r => setTimeout(r, 2000));
-            } finally {
-                isAttemptingRestart = false;
-            }
-        }
-
+        // 2. THE PERMANENT LISTENER
+        // We set this up once globally. It listens for ANY advertisement 
+        // that matches our filter, regardless of when the scale turns on.
         navigator.bluetooth.addEventListener('advertisementreceived', event => {
             lastPacketTime = Date.now();
             dot.style.background = "#00ff00";
+            statusText.innerText = "Scale Online";
 
             let mData = event.manufacturerData;
             if (mData && mData.size > 0) {
                 let raw = new DataView(mData.values().next().value.buffer);
+                // Correct offset for WH-C06 advertisement packets
                 const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
                 currentWeight = weightRaw / 100.0;
                 weightEl.innerHTML = `${currentWeight.toFixed(2)}<span class="unit">kg</span>`;
                 
-                if (isTraining) updateTraining();
+                if (isTraining) runTrainingLogic();
             }
         });
 
-        // WATCHDOG: Checks silence.
-        setInterval(() => {
-            if (bluetoothInitialized && !isAttemptingRestart) {
-                const idleTime = Date.now() - lastPacketTime;
-                if (idleTime > 5000) { 
-                    dot.style.background = "red";
-                    statusText.innerText = "Resyncing...";
-                    startOrRestartScan();
+        // 3. START FUNCTION (User Gesture)
+        async function startSystem() {
+            // Audio context must start on user click
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Wake lock to keep screen on
+            if ('wakeLock' in navigator && !wakeLock) {
+                try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+            }
+
+            try {
+                // We start the scan. If it's already running, Chrome handles it.
+                // We do NOT stop/restart it in a loop anymore.
+                await navigator.bluetooth.requestLEScan({
+                    keepRepeatedDevices: true,
+                    filters: [{ namePrefix: 'IF_B7' }]
+                });
+                
+                statusText.innerText = "Scan Initialized";
+            } catch (err) {
+                console.error(err);
+                // If it fails because a scan is already active, we just ignore the error
+                if (err.name !== "InvalidStateError") {
+                    statusText.innerText = "BT Error: " + err.message;
                 }
             }
-        }, 4000);
+        }
 
-        function updateTraining() {
+        function runTrainingLogic() {
             const target = parseFloat(document.getElementById('target-weight').value);
             const goalSec = parseFloat(document.getElementById('target-time').value);
             const now = Date.now();
@@ -178,60 +151,59 @@
                 lastTimestamp = 0; 
             }
 
+            // Update UI
             const seconds = (tutAccumulated / 1000).toFixed(1);
             timerEl.innerText = `TUT: ${seconds}s`;
             progressEl.style.width = Math.min((tutAccumulated / (goalSec * 1000)) * 100, 100) + "%";
 
             if (tutAccumulated >= goalSec * 1000) {
-                finishSet();
+                completeSet();
             }
         }
 
-        function finishSet() {
+        function completeSet() {
             isTraining = false;
             beep(440, 1.5);
             document.body.classList.add('finished');
-            finishMsg.classList.remove('hidden');
-            mainBtn.style.visibility = "hidden";
-
+            
             setTimeout(() => {
                 document.body.classList.remove('finished');
-                finishMsg.classList.add('hidden');
-                mainBtn.style.visibility = "visible";
-                resetTimer();
+                resetUI();
             }, 5000);
         }
 
-        function resetTimer() {
+        function resetUI() {
             isTraining = false;
             tutAccumulated = 0;
             lastTimestamp = 0;
             timerEl.innerText = `TUT: 0.0s`;
             progressEl.style.width = "0%";
             mainBtn.innerText = "START TRAINING";
-            mainBtn.className = "btn-ready";
+            mainBtn.classList.remove('btn-active');
         }
 
         mainBtn.addEventListener('click', () => {
-            initAudio();
-            requestWakeLock();
-            if (!bluetoothInitialized) {
-                startOrRestartScan().then(() => {
-                    if (bluetoothInitialized) {
-                        mainBtn.innerText = "START TRAINING";
-                        mainBtn.className = "btn-ready";
-                    }
-                });
-            } else if (!isTraining) {
+            startSystem(); // Re-up permissions/audio
+            if (!isTraining) {
                 isTraining = true;
                 tutAccumulated = 0;
                 lastTimestamp = 0;
                 mainBtn.innerText = "STOP / RESET";
-                mainBtn.className = "btn-active";
+                mainBtn.classList.add('btn-active');
             } else {
-                resetTimer();
+                resetUI();
             }
         });
+
+        // Simple watchdog: Only changes the UI dot color, does NOT touch the BT scan
+        setInterval(() => {
+            if (Date.now() - lastPacketTime > 3000) {
+                dot.style.background = "red";
+                statusText.innerText = "Scale Offline";
+                currentWeight = 0;
+                weightEl.innerHTML = `0.00<span class="unit">kg</span>`;
+            }
+        }, 1000);
     </script>
 </body>
 </html>
