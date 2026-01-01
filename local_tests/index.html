@@ -1,64 +1,185 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Passive Scale Pro</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Passive Isometric Trainer</title>
     <style>
-        body { font-family: sans-serif; text-align: center; background: #121212; color: #00ff00; padding: 20px; }
-        #weight { font-size: 100px; font-weight: bold; margin: 40px 0; }
-        #log { font-size: 12px; color: #888; text-align: left; background: #000; padding: 10px; height: 150px; overflow-y: scroll; }
-        button { padding: 20px; width: 100%; font-size: 20px; background: #00ff00; color: black; border: none; border-radius: 10px; }
+        :root { --bg: #121212; --primary: #00ff00; --accent: #333; }
+        body { 
+            font-family: sans-serif; text-align: center; background: var(--bg); color: var(--primary); 
+            margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; justify-content: space-around;
+        }
+        #status-dot { width: 12px; height: 12px; background: red; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        #weight-display { font-size: 80px; font-weight: bold; margin: 10px 0; }
+        .unit { font-size: 30px; }
+        .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .input-group { background: var(--accent); padding: 15px; border-radius: 12px; }
+        .input-group label { display: block; font-size: 12px; color: #888; margin-bottom: 5px; text-transform: uppercase; }
+        .input-group input { background: transparent; border: none; color: white; font-size: 24px; width: 80%; text-align: center; outline: none; }
+        #timer-display { font-size: 40px; color: white; }
+        .progress-container { width: 100%; height: 10px; background: #222; border-radius: 5px; overflow: hidden; }
+        #progress-bar { width: 0%; height: 100%; background: var(--primary); transition: width 0.1s; }
+        #main-btn { padding: 25px; width: 100%; font-size: 22px; font-weight: bold; background: var(--primary); color: black; border: none; border-radius: 15px; cursor: pointer; }
     </style>
 </head>
 <body>
-    <h1>Passive Scale Reader</h1>
-    <div id="weight">0.00 kg</div>
-    <button id="start">START SCANNING</button>
-    <div id="log">Logs:</div>
+
+    <div>
+        <div style="font-size: 14px; opacity: 0.8;">
+            <span id="status-dot"></span><span id="status-text">Disconnected</span>
+        </div>
+        <div id="weight-display">0.00<span class="unit">kg</span></div>
+    </div>
+
+    <div>
+        <div id="timer-display">TUT: 0.0s</div>
+        <div class="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+    </div>
+
+    <div class="settings-grid">
+        <div class="input-group">
+            <label>Target (kg)</label>
+            <input type="number" id="target-weight" value="10" step="0.5">
+        </div>
+        <div class="input-group">
+            <label>Goal (sec)</label>
+            <input type="number" id="target-time" value="30">
+        </div>
+    </div>
+
+    <button id="main-btn">START HIGH-PRIORITY SCAN</button>
 
     <script>
-        const weightEl = document.getElementById('weight');
-        const logEl = document.getElementById('log');
+        const weightEl = document.getElementById('weight-display');
+        const timerEl = document.getElementById('timer-display');
+        const progressEl = document.getElementById('progress-bar');
+        const mainBtn = document.getElementById('main-btn');
+        const dot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
 
-        function log(msg) {
-            logEl.innerHTML += `<div>${new Date().toLocaleTimeString()}: ${msg}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
+        let isTraining = false;
+        let currentWeight = 0;
+        let tutAccumulated = 0;
+        let lastTimestamp = 0;
+        let lastPacketTime = 0;
+        let currentScan = null;
+        let scanTimer = null;
+        let wakeLock = null;
+        let audioCtx = null;
+
+        // --- Audio Beeps ---
+        function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+        function beep(freq, duration) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.frequency.value = freq;
+            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+            osc.start(); osc.stop(audioCtx.currentTime + duration);
         }
 
-        document.getElementById('start').addEventListener('click', async () => {
+        // --- Wake Lock ---
+        async function toggleWakeLock(on) {
             try {
-                log("Requesting LE Scan...");
-                // We ask for a scan instead of a connection
-                const scan = await navigator.bluetooth.requestLEScan({
-                    filters: [{ namePrefix: 'IF_B7' }],
-                    keepRepeatedDevices: true // CRITICAL: This allows high-frequency updates
-                });
+                if (on && 'wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+                else if (wakeLock) { await wakeLock.release(); wakeLock = null; }
+            } catch (err) { console.log("WakeLock error: " + err.message); }
+        }
 
-                log("Scan Started! Listening...");
+        // --- Original Passive BT Logic ---
+        navigator.bluetooth.addEventListener('advertisementreceived', event => {
+            lastPacketTime = Date.now();
+            dot.style.background = "#00ff00";
+            statusText.innerText = "Receiving Data";
 
-                navigator.bluetooth.addEventListener('advertisementreceived', event => {
-                    log("Packet received!");
-                    
-                    // Access Manufacturer Data
-                    let mData = event.manufacturerData;
-                    if (mData && mData.size > 0) {
-                        // Get the first value in the map
-                        let raw = new DataView(mData.values().next().value.buffer);
-                        
-                        // Using our confirmed logic (Bytes 10 and 11)
-                        // Note: DataView indices depend on how the browser packs the buffer
-                        // If 10/11 fails, try 11/12 or 1/2
-                        const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
-                        const weight = weightRaw / 100.0;
-                        
-                        weightEl.innerText = weight.toFixed(2) + " kg";
-                    }
-                });
-
-            } catch (err) {
-                log("Error: " + err.message);
-                console.error(err);
+            let mData = event.manufacturerData;
+            if (mData && mData.size > 0) {
+                let raw = new DataView(mData.values().next().value.buffer);
+                const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
+                currentWeight = weightRaw / 100.0;
+                weightEl.innerHTML = `${currentWeight.toFixed(2)}<span class="unit">kg</span>`;
+                
+                if (isTraining) updateTrainingLogic();
             }
         });
+
+        async function startPassiveScan() {
+            try {
+                if (currentScan) await currentScan.stop();
+                // Using your original filters to avoid the "pairing" prompt
+                currentScan = await navigator.bluetooth.requestLEScan({
+                    keepRepeatedDevices: true,
+                    filters: [{ namePrefix: 'IF_B7' }]
+                });
+                statusText.innerText = "Scanning...";
+                clearTimeout(scanTimer);
+                scanTimer = setTimeout(startPassiveScan, 20000); // Keep-alive loop
+            } catch (err) { statusText.innerText = "Error: " + err.message; }
+        }
+
+        function updateTrainingLogic() {
+            const target = parseFloat(document.getElementById('target-weight').value);
+            const goalSec = parseFloat(document.getElementById('target-time').value);
+            const now = Date.now();
+
+            if (currentWeight >= target) {
+                if (lastTimestamp > 0) {
+                    const delta = now - lastTimestamp;
+                    const oldSec = Math.floor(tutAccumulated / 1000);
+                    tutAccumulated += delta;
+                    const newSec = Math.floor(tutAccumulated / 1000);
+                    if (newSec > oldSec) beep(800, 0.1); // Tick beep
+                }
+                lastTimestamp = now;
+            } else {
+                lastTimestamp = 0; // Pause timer if weight drops
+            }
+
+            const seconds = (tutAccumulated / 1000).toFixed(1);
+            timerEl.innerText = `TUT: ${seconds}s`;
+            progressEl.style.width = Math.min((tutAccumulated / (goalSec * 1000)) * 100, 100) + "%";
+
+            if (tutAccumulated >= goalSec * 1000) {
+                isTraining = false;
+                beep(440, 1.5); // Success beep
+                alert("Goal Reached!");
+                resetTrainingState();
+            }
+        }
+
+        function resetTrainingState() {
+            isTraining = false;
+            tutAccumulated = 0;
+            lastTimestamp = 0;
+            mainBtn.innerText = "START TRAINING";
+            mainBtn.style.background = "#00ff00";
+            toggleWakeLock(false);
+        }
+
+        mainBtn.addEventListener('click', () => {
+            initAudio();
+            if (!isTraining) {
+                isTraining = true;
+                mainBtn.innerText = "STOP / RESET";
+                mainBtn.style.background = "#ff4444";
+                toggleWakeLock(true);
+                startPassiveScan();
+            } else {
+                resetTrainingState();
+            }
+        });
+
+        // Watchdog for UI dot
+        setInterval(() => {
+            if (Date.now() - lastPacketTime > 1500) {
+                dot.style.background = "red";
+                statusText.innerText = "Idle";
+            }
+        }, 1000);
     </script>
 </body>
 </html>
