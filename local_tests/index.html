@@ -1,3 +1,4 @@
+<!-- Nice interface, all good for first proto, to improve: alert when desired TUT reached... I'd prefer a change in the page, but not something with a button to press (best with as little button to press) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,19 +6,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Isometric Crane Trainer</title>
     <style>
-        :root { --bg: #121212; --primary: #00ff00; --accent: #333; }
+        :root { --bg: #121212; --primary: #00ff00; --accent: #333; --text: #00ff00; }
         body { 
-            font-family: sans-serif; text-align: center; background: var(--bg); color: var(--primary); 
+            font-family: sans-serif; text-align: center; background: var(--bg); color: var(--text); 
             margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; justify-content: space-around;
+            transition: background 0.3s, color 0.3s;
         }
+        /* Finished State Styling */
+        body.finished { --bg: #00ff00; --text: #000; --primary: #000; --accent: #00cc00; }
+
         #status-dot { width: 12px; height: 12px; background: red; border-radius: 50%; display: inline-block; margin-right: 8px; }
         #weight-display { font-size: 80px; font-weight: bold; margin: 10px 0; }
         .unit { font-size: 30px; }
         .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .input-group { background: var(--accent); padding: 15px; border-radius: 12px; }
+        .input-group { background: var(--accent); padding: 15px; border-radius: 12px; transition: background 0.3s; }
         .input-group label { display: block; font-size: 11px; color: #888; margin-bottom: 5px; text-transform: uppercase; }
-        .input-group input { background: transparent; border: none; color: white; font-size: 24px; width: 80%; text-align: center; outline: none; }
-        #timer-display { font-size: 40px; color: white; }
+        .input-group input { background: transparent; border: none; color: inherit; font-size: 24px; width: 80%; text-align: center; outline: none; }
+        #timer-display { font-size: 40px; color: inherit; }
         .progress-container { width: 100%; height: 12px; background: #222; border-radius: 6px; overflow: hidden; }
         #progress-bar { width: 0%; height: 100%; background: var(--primary); transition: width 0.15s linear; }
         
@@ -28,12 +33,13 @@
         }
         .btn-ready { background: var(--primary) !important; color: black !important; }
         .btn-active { background: #ff4444 !important; color: white !important; }
+        .hidden { visibility: hidden; }
     </style>
 </head>
 <body>
 
     <div>
-        <div style="font-size: 13px; opacity: 0.8;">
+        <div id="status-area" style="font-size: 13px; opacity: 0.8;">
             <span id="status-dot"></span><span id="status-text">Bluetooth: Not Initialized</span>
         </div>
         <div id="weight-display">0.00<span class="unit">kg</span></div>
@@ -44,6 +50,7 @@
         <div class="progress-container">
             <div id="progress-bar"></div>
         </div>
+        <div id="finish-msg" class="hidden" style="font-weight: bold; margin-top: 10px;">SET COMPLETE! RESTING...</div>
     </div>
 
     <div class="settings-grid">
@@ -66,6 +73,7 @@
         const mainBtn = document.getElementById('main-btn');
         const dot = document.getElementById('status-dot');
         const statusText = document.getElementById('status-text');
+        const finishMsg = document.getElementById('finish-msg');
 
         let bluetoothInitialized = false;
         let isTraining = false;
@@ -76,7 +84,6 @@
         let wakeLock = null;
         let audioCtx = null;
 
-        // --- Audio Context ---
         function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
         
         function beep(freq, duration) {
@@ -89,28 +96,22 @@
             osc.start(); osc.stop(audioCtx.currentTime + duration);
         }
 
-        // --- Keep Screen Awake ---
         async function requestWakeLock() {
             if ('wakeLock' in navigator) {
                 try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
             }
         }
 
-        // --- Bluetooth Logic ---
         async function initializeBluetooth() {
             try {
-                // This will trigger the popup ONLY ONCE
                 await navigator.bluetooth.requestLEScan({
                     keepRepeatedDevices: true,
                     filters: [{ namePrefix: 'IF_B7' }]
                 });
-
                 bluetoothInitialized = true;
                 mainBtn.innerText = "START TRAINING";
                 mainBtn.className = "btn-ready";
                 statusText.innerText = "BT Active - Ready";
-                
-                // Audio needs a gesture to start
                 initAudio();
                 requestWakeLock();
             } catch (err) {
@@ -145,8 +146,7 @@
                     const oldSec = Math.floor(tutAccumulated / 1000);
                     tutAccumulated += delta;
                     const newSec = Math.floor(tutAccumulated / 1000);
-                    
-                    if (newSec > oldSec) beep(800, 0.05); // Tick beep
+                    if (newSec > oldSec) beep(800, 0.05);
                 }
                 lastTimestamp = now;
             } else {
@@ -158,15 +158,34 @@
             progressEl.style.width = Math.min((tutAccumulated / (goalSec * 1000)) * 100, 100) + "%";
 
             if (tutAccumulated >= goalSec * 1000) {
-                beep(440, 1.2); 
-                stopSet();
-                setTimeout(() => alert("Goal Reached!"), 100);
+                handleFinish();
             }
         }
 
-        function stopSet() {
+        function handleFinish() {
             isTraining = false;
+            beep(440, 1.5);
+            
+            // Visual Feedback
+            document.body.classList.add('finished');
+            finishMsg.classList.remove('hidden');
+            mainBtn.style.visibility = "hidden"; // Hide button so you don't accidentally double-press
+
+            // Auto-Reset after 5 seconds
+            setTimeout(() => {
+                document.body.classList.remove('finished');
+                finishMsg.classList.add('hidden');
+                mainBtn.style.visibility = "visible";
+                resetSet();
+            }, 5000);
+        }
+
+        function resetSet() {
+            isTraining = false;
+            tutAccumulated = 0;
             lastTimestamp = 0;
+            timerEl.innerText = `TUT: 0.0s`;
+            progressEl.style.width = "0%";
             mainBtn.innerText = "START TRAINING";
             mainBtn.className = "btn-ready";
         }
@@ -175,20 +194,17 @@
             if (!bluetoothInitialized) {
                 initializeBluetooth();
             } else if (!isTraining) {
-                // START TRAINING (No popup here)
                 isTraining = true;
                 tutAccumulated = 0;
                 lastTimestamp = 0;
                 mainBtn.innerText = "STOP / RESET";
                 mainBtn.className = "btn-active";
-                initAudio(); // Ensure audio is active
+                initAudio();
             } else {
-                // STOP TRAINING
-                stopSet();
+                resetSet();
             }
         });
 
-        // Watchdog
         setInterval(() => {
             if (bluetoothInitialized && (Date.now() - lastPacketTime > 2500)) {
                 dot.style.background = "red";
