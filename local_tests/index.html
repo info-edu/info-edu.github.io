@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Crane Trainer - Stable Scan</title>
+    <title>Isometric Crane Trainer</title>
     <style>
         :root { --bg: #121212; --primary: #00ff00; --accent: #333; }
         body { 
@@ -20,15 +20,21 @@
         #timer-display { font-size: 40px; color: white; }
         .progress-container { width: 100%; height: 12px; background: #222; border-radius: 6px; overflow: hidden; }
         #progress-bar { width: 0%; height: 100%; background: var(--primary); transition: width 0.15s linear; }
-        #main-btn { padding: 25px; width: 100%; font-size: 22px; font-weight: bold; background: var(--primary); color: black; border: none; border-radius: 15px; cursor: pointer; transition: 0.2s; }
-        #main-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        #main-btn { 
+            padding: 25px; width: 100%; font-size: 22px; font-weight: bold; 
+            border: none; border-radius: 15px; cursor: pointer; transition: 0.2s;
+            background: #555; color: white;
+        }
+        .btn-ready { background: var(--primary) !important; color: black !important; }
+        .btn-active { background: #ff4444 !important; color: white !important; }
     </style>
 </head>
 <body>
 
     <div>
         <div style="font-size: 13px; opacity: 0.8;">
-            <span id="status-dot"></span><span id="status-text">Bluetooth: Idle</span>
+            <span id="status-dot"></span><span id="status-text">Bluetooth: Not Initialized</span>
         </div>
         <div id="weight-display">0.00<span class="unit">kg</span></div>
     </div>
@@ -51,7 +57,7 @@
         </div>
     </div>
 
-    <button id="main-btn">START TRAINING</button>
+    <button id="main-btn">1. INITIALIZE BLUETOOTH</button>
 
     <script>
         const weightEl = document.getElementById('weight-display');
@@ -61,17 +67,18 @@
         const dot = document.getElementById('status-dot');
         const statusText = document.getElementById('status-text');
 
+        let bluetoothInitialized = false;
         let isTraining = false;
         let currentWeight = 0;
         let tutAccumulated = 0;
         let lastTimestamp = 0;
         let lastPacketTime = 0;
-        let activeScan = null;
         let wakeLock = null;
         let audioCtx = null;
 
-        // --- Audio ---
+        // --- Audio Context ---
         function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+        
         function beep(freq, duration) {
             if (!audioCtx) return;
             const osc = audioCtx.createOscillator();
@@ -82,38 +89,32 @@
             osc.start(); osc.stop(audioCtx.currentTime + duration);
         }
 
-        // --- Wake Lock (Prevents Sleep) ---
-        async function toggleWakeLock(on) {
-            if (on && 'wakeLock' in navigator) {
+        // --- Keep Screen Awake ---
+        async function requestWakeLock() {
+            if ('wakeLock' in navigator) {
                 try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
-            } else if (wakeLock) {
-                await wakeLock.release();
-                wakeLock = null;
             }
         }
 
-        // --- Stable Bluetooth Scanning ---
-        async function startSafeScan() {
+        // --- Bluetooth Logic ---
+        async function initializeBluetooth() {
             try {
-                // If a scan is already running, don't trigger a new request
-                if (activeScan && activeScan.active) return;
-
-                statusText.innerText = "Scanning...";
-                activeScan = await navigator.bluetooth.requestLEScan({
+                // This will trigger the popup ONLY ONCE
+                await navigator.bluetooth.requestLEScan({
                     keepRepeatedDevices: true,
                     filters: [{ namePrefix: 'IF_B7' }]
                 });
 
-                // Instead of a 20s recursive loop which causes the crash,
-                // we only restart if the scan object itself reports it stopped.
-                activeScan.addEventListener('stop', () => {
-                    if (isTraining) setTimeout(startSafeScan, 1000);
-                });
-
+                bluetoothInitialized = true;
+                mainBtn.innerText = "START TRAINING";
+                mainBtn.className = "btn-ready";
+                statusText.innerText = "BT Active - Ready";
+                
+                // Audio needs a gesture to start
+                initAudio();
+                requestWakeLock();
             } catch (err) {
-                console.error(err);
-                statusText.innerText = "Scan Failed. Retrying...";
-                if (isTraining) setTimeout(startSafeScan, 2000); // Wait 2s before retry
+                alert("Bluetooth init failed: " + err.message);
             }
         }
 
@@ -125,16 +126,15 @@
             let mData = event.manufacturerData;
             if (mData && mData.size > 0) {
                 let raw = new DataView(mData.values().next().value.buffer);
-                // Standard offset for WH-C06 scales
                 const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
                 currentWeight = weightRaw / 100.0;
                 weightEl.innerHTML = `${currentWeight.toFixed(2)}<span class="unit">kg</span>`;
                 
-                if (isTraining) updateTUT();
+                if (isTraining) updateTrainingLogic();
             }
         });
 
-        function updateTUT() {
+        function updateTrainingLogic() {
             const target = parseFloat(document.getElementById('target-weight').value);
             const goalSec = parseFloat(document.getElementById('target-time').value);
             const now = Date.now();
@@ -146,11 +146,11 @@
                     tutAccumulated += delta;
                     const newSec = Math.floor(tutAccumulated / 1000);
                     
-                    if (newSec > oldSec) beep(800, 0.05); // Tick every second held
+                    if (newSec > oldSec) beep(800, 0.05); // Tick beep
                 }
                 lastTimestamp = now;
             } else {
-                lastTimestamp = 0; // Pause timer if force is too low
+                lastTimestamp = 0; 
             }
 
             const seconds = (tutAccumulated / 1000).toFixed(1);
@@ -158,38 +158,39 @@
             progressEl.style.width = Math.min((tutAccumulated / (goalSec * 1000)) * 100, 100) + "%";
 
             if (tutAccumulated >= goalSec * 1000) {
-                beep(440, 1.0); // Victory beep
-                stopTraining();
+                beep(440, 1.2); 
+                stopSet();
                 setTimeout(() => alert("Goal Reached!"), 100);
             }
         }
 
-        function stopTraining() {
+        function stopSet() {
             isTraining = false;
+            lastTimestamp = 0;
             mainBtn.innerText = "START TRAINING";
-            mainBtn.style.background = "#00ff00";
-            toggleWakeLock(false);
-            if (activeScan) activeScan.stop();
+            mainBtn.className = "btn-ready";
         }
 
         mainBtn.addEventListener('click', () => {
-            initAudio();
-            if (!isTraining) {
+            if (!bluetoothInitialized) {
+                initializeBluetooth();
+            } else if (!isTraining) {
+                // START TRAINING (No popup here)
                 isTraining = true;
                 tutAccumulated = 0;
                 lastTimestamp = 0;
                 mainBtn.innerText = "STOP / RESET";
-                mainBtn.style.background = "#ff4444";
-                toggleWakeLock(true);
-                startSafeScan();
+                mainBtn.className = "btn-active";
+                initAudio(); // Ensure audio is active
             } else {
-                stopTraining();
+                // STOP TRAINING
+                stopSet();
             }
         });
 
-        // UI Watchdog (Red dot if no data for 2 seconds)
+        // Watchdog
         setInterval(() => {
-            if (Date.now() - lastPacketTime > 2000) {
+            if (bluetoothInitialized && (Date.now() - lastPacketTime > 2500)) {
                 dot.style.background = "red";
                 statusText.innerText = "Scale Offline";
             }
