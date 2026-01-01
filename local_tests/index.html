@@ -3,70 +3,58 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Isometric Trainer</title>
+    <title>Isometric Pro Trainer</title>
     <style>
         :root { --bg: #0a0a0a; --primary: #00ff00; --accent: #222; }
         body { 
-            font-family: -apple-system, sans-serif; text-align: center; 
-            background: var(--bg); color: var(--primary); margin: 0; padding: 20px;
-            display: flex; flex-direction: column; height: 100vh; justify-content: space-around;
-            transition: background 0.2s;
+            font-family: sans-serif; text-align: center; background: var(--bg); color: var(--primary); 
+            margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; justify-content: space-around;
         }
-        body.active-pull { background: #002200; }
-        body.finished { background: #00ff00; color: #000; }
-        
         #weight-display { font-size: 90px; font-weight: 800; margin: 0; }
         .unit { font-size: 30px; }
-        #timer-display { font-size: 48px; color: #fff; font-variant-numeric: tabular-nums; }
-
+        #timer-display { font-size: 48px; color: #fff; }
+        
         .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         .input-box { background: var(--accent); padding: 15px; border-radius: 15px; }
-        .input-box label { display: block; font-size: 12px; color: #888; margin-bottom: 5px; text-transform: uppercase; }
+        .input-box label { display: block; font-size: 11px; color: #888; margin-bottom: 5px; text-transform: uppercase; }
         .input-box input { background: transparent; border: none; color: white; font-size: 28px; width: 100%; text-align: center; outline: none; }
 
         #main-btn { 
             padding: 30px; width: 100%; font-size: 26px; font-weight: bold; 
             border: none; border-radius: 20px; cursor: pointer;
-            background: var(--primary); color: black; box-shadow: 0 10px 20px rgba(0,255,0,0.2);
+            background: var(--primary); color: black; transition: 0.2s;
         }
         #main-btn.stop { background: #ff4444; color: white; }
+        #main-btn.reconnect { background: #ffaa00; animation: pulse 1.5s infinite; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
         
         #status { font-size: 12px; opacity: 0.6; }
-        #progress-container { width: 100%; height: 12px; background: #1a1a1a; border-radius: 6px; overflow: hidden; }
-        #progress-bar { width: 0%; height: 100%; background: var(--primary); transition: width 0.1s linear; }
+        #progress-bar { width: 0%; height: 12px; background: var(--primary); border-radius: 6px; transition: 0.1s linear; }
     </style>
 </head>
 <body>
 
-    <div id="status">● OFFLINE</div>
+    <div id="status">● DISCONNECTED</div>
 
-    <div id="display-area">
+    <div>
         <p id="weight-display">0.00<span class="unit">kg</span></p>
         <div id="timer-display">00.0s</div>
-        <div id="progress-container">
+        <div style="background: #1a1a1a; border-radius: 6px; margin-top: 10px;">
             <div id="progress-bar"></div>
         </div>
     </div>
 
     <div class="settings">
-        <div class="input-box">
-            <label>Target (kg)</label>
-            <input type="number" id="target-w" value="10" step="0.5">
-        </div>
-        <div class="input-box">
-            <label>Goal (sec)</label>
-            <input type="number" id="target-t" value="30">
-        </div>
+        <div class="input-box"><label>Target (kg)</label><input type="number" id="target-w" value="10"></div>
+        <div class="input-box"><label>Goal (sec)</label><input type="number" id="target-t" value="30"></div>
     </div>
 
-    <button id="main-btn">START SET</button>
+    <button id="main-btn">START TRAINING</button>
 
     <script>
-        let isTraining = false;
-        let tutMs = 0;
-        let lastTime = 0;
-        let currentWeight = 0;
-        let audioCtx, wakeLock;
+        let isTraining = false, tutMs = 0, lastTime = 0, currentWeight = 0;
+        let audioCtx, wakeLock, lastPacket = 0;
 
         const weightEl = document.getElementById('weight-display');
         const timerEl = document.getElementById('timer-display');
@@ -74,7 +62,6 @@
         const mainBtn = document.getElementById('main-btn');
         const statusEl = document.getElementById('status');
 
-        // Audio Beeps
         function playBeep(freq, dur) {
             if (!audioCtx) return;
             const osc = audioCtx.createOscillator();
@@ -85,9 +72,9 @@
             osc.start(); osc.stop(audioCtx.currentTime + dur);
         }
 
-        // Bluetooth Handler
         navigator.bluetooth.addEventListener('advertisementreceived', e => {
-            statusEl.innerText = "● LIVE DATA";
+            lastPacket = Date.now();
+            statusEl.innerText = "● LIVE";
             statusEl.style.color = "#00ff00";
             
             let mData = e.manufacturerData;
@@ -96,86 +83,72 @@
                 const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
                 currentWeight = weightRaw / 100.0;
                 weightEl.innerHTML = `${currentWeight.toFixed(2)}<span class="unit">kg</span>`;
-                
-                if (isTraining) runLogic();
+                if (isTraining) updateTUT();
             }
         });
 
-        function runLogic() {
+        function updateTUT() {
             const targetW = parseFloat(document.getElementById('target-w').value);
             const goalS = parseFloat(document.getElementById('target-t').value);
             const now = Date.now();
 
             if (currentWeight >= targetW) {
-                document.body.classList.add('active-pull');
                 if (lastTime > 0) {
-                    const delta = now - lastTime;
                     const oldSec = Math.floor(tutMs / 1000);
-                    tutMs += delta;
-                    if (Math.floor(tutMs / 1000) > oldSec) playBeep(800, 0.05); // Tick
+                    tutMs += (now - lastTime);
+                    if (Math.floor(tutMs / 1000) > oldSec) playBeep(800, 0.05);
                 }
                 lastTime = now;
-            } else {
-                document.body.classList.remove('active-pull');
-                lastTime = 0;
-            }
+            } else { lastTime = 0; }
 
             timerEl.innerText = (tutMs / 1000).toFixed(1) + "s";
             progressEl.style.width = Math.min((tutMs / (goalS * 1000)) * 100, 100) + "%";
 
             if (tutMs >= (goalS * 1000)) {
-                finishSet();
+                isTraining = false;
+                playBeep(440, 1.5);
+                mainBtn.innerText = "SET COMPLETE";
+                setTimeout(resetUI, 4000);
             }
         }
 
-        function finishSet() {
-            isTraining = false;
-            playBeep(440, 1.5); // Long finish beep
-            document.body.classList.remove('active-pull');
-            document.body.classList.add('finished');
-            mainBtn.innerText = "SET COMPLETE";
-            
-            setTimeout(() => {
-                document.body.classList.remove('finished');
-                resetSession();
-            }, 4000);
-        }
-
-        function resetSession() {
-            isTraining = false;
-            tutMs = 0;
-            lastTime = 0;
+        function resetUI() {
+            isTraining = false; tutMs = 0; lastTime = 0;
             timerEl.innerText = "00.0s";
             progressEl.style.width = "0%";
-            mainBtn.innerText = "START SET";
+            mainBtn.innerText = "START TRAINING";
             mainBtn.className = "";
         }
 
         mainBtn.addEventListener('click', async () => {
             if (!audioCtx) audioCtx = new AudioContext();
-            if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+            if ('wakeLock' in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request('screen');
 
             if (!isTraining) {
                 try {
-                    // This REFRESHES the 5-minute Android timer
+                    // Force a fresh scan request to reset the 5-minute Android timer
                     await navigator.bluetooth.requestLEScan({
                         keepRepeatedDevices: true,
                         filters: [{ namePrefix: 'IF_B7' }]
                     });
-                    
                     isTraining = true;
-                    tutMs = 0;
-                    lastTime = 0;
                     mainBtn.innerText = "STOP SET";
                     mainBtn.className = "stop";
-                    statusEl.innerText = "● SCANNING...";
-                } catch (err) {
-                    alert("Click 'Allow' to start the scan");
-                }
-            } else {
-                resetSession();
-            }
+                } catch (err) { console.log("Scan cancelled or failed"); }
+            } else { resetUI(); }
         });
+
+        // Watchdog to detect the 5-minute dropout
+        setInterval(() => {
+            if (Date.now() - lastPacket > 5000) {
+                statusEl.innerText = "● OFFLINE (RE-SYNC NEEDED)";
+                statusEl.style.color = "red";
+                if (!isTraining) {
+                    mainBtn.innerText = "RE-SYNC SCALE";
+                    mainBtn.className = "reconnect";
+                }
+            }
+        }, 2000);
     </script>
 </body>
 </html>
