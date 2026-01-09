@@ -1,11 +1,13 @@
+<!-- improve UX by not having to click in between every rep
+The button has 3 functions: connect, start, reset -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Isometric Pro Trainer</title>
+    <title>Isometric Pro Trainer - AutoLoop</title>
     <style>
-        :root { --bg: #0a0a0a; --primary: #00ff00; --accent: #222; }
+        :root { --bg: #0a0a0a; --primary: #00ff00; --accent: #222; --error: #ff4444; --warn: #ffaa00; }
         body { 
             font-family: sans-serif; text-align: center; background: var(--bg); color: var(--primary); 
             margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; justify-content: space-around;
@@ -24,13 +26,15 @@
             border: none; border-radius: 20px; cursor: pointer;
             background: var(--primary); color: black; transition: 0.2s;
         }
-        #main-btn.stop { background: #ff4444; color: white; }
-        #main-btn.reconnect { background: #ffaa00; animation: pulse 1.5s infinite; }
+        #main-btn.stop { background: var(--error); color: white; }
+        #main-btn.reconnect { background: var(--warn); animation: pulse 1.5s infinite; }
+        #main-btn.ready { background: #0088ff; color: white; }
         
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
         
         #status { font-size: 12px; opacity: 0.6; }
         #progress-bar { width: 0%; height: 12px; background: var(--primary); border-radius: 6px; transition: 0.1s linear; }
+        #progress-bar.complete { background: #fff; }
     </style>
 </head>
 <body>
@@ -50,10 +54,12 @@
         <div class="input-box"><label>Goal (sec)</label><input type="number" id="target-t" value="30"></div>
     </div>
 
-    <button id="main-btn">START TRAINING</button>
+    <button id="main-btn">1. CONNECT SCALE</button>
 
     <script>
-        let isTraining = false, tutMs = 0, lastTime = 0, currentWeight = 0;
+        // States: 'DISCONNECTED', 'READY', 'TRAINING'
+        let appState = 'DISCONNECTED';
+        let tutMs = 0, lastTime = 0, currentWeight = 0;
         let audioCtx, wakeLock, lastPacket = 0;
 
         const weightEl = document.getElementById('weight-display');
@@ -64,26 +70,32 @@
 
         function playBeep(freq, dur) {
             if (!audioCtx) return;
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.connect(gain); gain.connect(audioCtx.destination);
-            osc.frequency.value = freq;
-            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
-            osc.start(); osc.stop(audioCtx.currentTime + dur);
+            try {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.frequency.value = freq;
+                gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+                osc.start(); osc.stop(audioCtx.currentTime + dur);
+            } catch(e) { console.error("Audio error", e); }
         }
 
         navigator.bluetooth.addEventListener('advertisementreceived', e => {
             lastPacket = Date.now();
-            statusEl.innerText = "● LIVE";
-            statusEl.style.color = "#00ff00";
             
+            // If we were offline, transition back to READY or keep TRAINING
+            if (appState === 'DISCONNECTED') {
+                updateAppState('READY');
+            }
+
             let mData = e.manufacturerData;
             if (mData && mData.size > 0) {
                 let raw = new DataView(mData.values().next().value.buffer);
                 const weightRaw = (raw.getUint8(10) << 8) + raw.getUint8(11);
                 currentWeight = weightRaw / 100.0;
                 weightEl.innerHTML = `${currentWeight.toFixed(2)}<span class="unit">kg</span>`;
-                if (isTraining) updateTUT();
+                
+                if (appState === 'TRAINING') updateTUT();
             }
         });
 
@@ -92,61 +104,102 @@
             const goalS = parseFloat(document.getElementById('target-t').value);
             const now = Date.now();
 
+            // Only progress timer if weight is above target
             if (currentWeight >= targetW) {
                 if (lastTime > 0) {
                     const oldSec = Math.floor(tutMs / 1000);
                     tutMs += (now - lastTime);
+                    // Second-by-second feedback
                     if (Math.floor(tutMs / 1000) > oldSec) playBeep(800, 0.05);
                 }
                 lastTime = now;
-            } else { lastTime = 0; }
+            } else { 
+                lastTime = 0; 
+            }
 
             timerEl.innerText = (tutMs / 1000).toFixed(1) + "s";
             progressEl.style.width = Math.min((tutMs / (goalS * 1000)) * 100, 100) + "%";
 
+            // Goal Reached
             if (tutMs >= (goalS * 1000)) {
-                isTraining = false;
-                playBeep(440, 1.5);
-                mainBtn.innerText = "SET COMPLETE";
-                setTimeout(resetUI, 4000);
+                completeSet();
             }
         }
 
-        function resetUI() {
-            isTraining = false; tutMs = 0; lastTime = 0;
+        function completeSet() {
+            appState = 'COMPLETED'; // Temporary state
+            playBeep(440, 1.5);
+            mainBtn.innerText = "GOAL REACHED!";
+            progressEl.classList.add('complete');
+            
+            // Auto-restart logic: wait 3 seconds then go back to READY
+            setTimeout(() => {
+                resetTrainingSession();
+            }, 3000);
+        }
+
+        function resetTrainingSession() {
+            tutMs = 0;
+            lastTime = 0;
             timerEl.innerText = "00.0s";
             progressEl.style.width = "0%";
-            mainBtn.innerText = "START TRAINING";
-            mainBtn.className = "";
+            progressEl.classList.remove('complete');
+            updateAppState('READY');
+        }
+
+        function updateAppState(newState) {
+            appState = newState;
+            switch(newState) {
+                case 'DISCONNECTED':
+                    statusEl.innerText = "● OFFLINE (RE-SYNC NEEDED)";
+                    statusEl.style.color = "red";
+                    mainBtn.innerText = "RE-SYNC SCALE";
+                    mainBtn.className = "reconnect";
+                    break;
+                case 'READY':
+                    statusEl.innerText = "● LIVE";
+                    statusEl.style.color = "#00ff00";
+                    mainBtn.innerText = "START TRAINING";
+                    mainBtn.className = "ready";
+                    break;
+                case 'TRAINING':
+                    statusEl.innerText = "● TRAINING ACTIVE";
+                    statusEl.style.color = "#00ff00";
+                    mainBtn.innerText = "STOP / RESET";
+                    mainBtn.className = "stop";
+                    break;
+            }
         }
 
         mainBtn.addEventListener('click', async () => {
             if (!audioCtx) audioCtx = new AudioContext();
-            if ('wakeLock' in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request('screen');
+            if ('wakeLock' in navigator && !wakeLock) {
+                try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+            }
 
-            if (!isTraining) {
+            if (appState === 'DISCONNECTED' || appState === 'READY') {
                 try {
-                    // Force a fresh scan request to reset the 5-minute Android timer
+                    // Start Scan
                     await navigator.bluetooth.requestLEScan({
                         keepRepeatedDevices: true,
                         filters: [{ namePrefix: 'IF_B7' }]
                     });
-                    isTraining = true;
-                    mainBtn.innerText = "STOP SET";
-                    mainBtn.className = "stop";
-                } catch (err) { console.log("Scan cancelled or failed"); }
-            } else { resetUI(); }
+                    
+                    if (appState === 'READY') {
+                        updateAppState('TRAINING');
+                    } else {
+                        updateAppState('READY');
+                    }
+                } catch (err) { console.log("Scan failed"); }
+            } else if (appState === 'TRAINING') {
+                resetTrainingSession();
+            }
         });
 
-        // Watchdog to detect the 5-minute dropout
+        // Watchdog for the 5-minute Android timeout
         setInterval(() => {
-            if (Date.now() - lastPacket > 5000) {
-                statusEl.innerText = "● OFFLINE (RE-SYNC NEEDED)";
-                statusEl.style.color = "red";
-                if (!isTraining) {
-                    mainBtn.innerText = "RE-SYNC SCALE";
-                    mainBtn.className = "reconnect";
-                }
+            if (Date.now() - lastPacket > 5000 && appState !== 'DISCONNECTED') {
+                updateAppState('DISCONNECTED');
             }
         }, 2000);
     </script>
